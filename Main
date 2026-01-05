@@ -1,0 +1,536 @@
+local Players = game:GetService("Players")
+local PathfindingService = game:GetService("PathfindingService")
+local RunService = game:GetService("RunService")
+local Debris = game:GetService("Debris")
+local Workspace = game:GetService("Workspace")
+
+-- [[ GENIUS NEXTBOT V13.17 (SPECTATOR MODE) - ENHANCED GLITCH ]]
+
+local CONFIG = {
+	-- Visuals
+	IMAGE_ID = "rbxassetid://73737627", 
+	AUDIO_CHASE_ID = "rbxassetid://1848090833", 
+	AUDIO_JUMPSCARE_ID = "rbxassetid://9060084190",
+	AUDIO_GLITCH_ID = "rbxassetid://4852616963", 
+	
+	-- Mechanics
+	KILL_DIST = 5, 
+	SPAWN_DIST = 45,
+	CONSTANT_SPEED = 60, 
+	BASE_JUMP = 60,
+	
+	-- Stockfish Logic
+	PREDICTION_FACTOR = 0.6,
+	WALL_READ_DIST = 20, 
+	
+	-- World Analysis
+	SPEED_BOOST_MATS = { [Enum.Material.Neon] = 1.5, [Enum.Material.Ice] = 1.3 },
+	SPEED_SLOW_MATS = { [Enum.Material.Sand] = 0.7, [Enum.Material.Grass] = 0.9 },
+	
+	-- Debug
+	SHOW_WAYPOINTS = false, 
+	WAYPOINT_COLOR = BrickColor.new("Lime green")
+}
+
+local RAY_PARAMS = RaycastParams.new()
+RAY_PARAMS.FilterType = Enum.RaycastFilterType.Exclude
+RAY_PARAMS.IgnoreWater = false 
+
+local SCORE = 0 
+local IS_FROZEN = false 
+local IS_SPECTATING = false 
+
+-- 1. HELPER: RAGDOLL
+local function triggerRagdoll(character)
+	local humanoid = character:FindFirstChild("Humanoid")
+	if not humanoid then return end
+	if humanoid:GetState() == Enum.HumanoidStateType.Physics then return end
+
+	humanoid.BreakJointsOnDeath = false
+	humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+
+	for _, v in pairs(character:GetDescendants()) do
+		if v:IsA("Motor6D") then
+			local a0, a1 = Instance.new("Attachment"), Instance.new("Attachment")
+			a0.CFrame = v.C0; a1.CFrame = v.C1; a0.Parent = v.Part0; a1.Parent = v.Part1
+			local b = Instance.new("BallSocketConstraint"); b.Attachment0 = a0; b.Attachment1 = a1; b.Parent = v.Part0
+			v:Destroy() 
+		elseif v:IsA("BasePart") then
+			v.CanCollide = true 
+		end
+	end
+end
+
+-- 2. GUI BUILDER
+local function createControlGui(player)
+	if player:WaitForChild("PlayerGui"):FindFirstChild("NextbotControlGUI") then
+		local gui = player.PlayerGui.NextbotControlGUI
+		return gui.FreezeButton, gui.SpectateButton
+	end
+
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "NextbotControlGUI"
+	sg.ResetOnSpawn = false 
+	sg.Parent = player:WaitForChild("PlayerGui")
+	
+	-- FREEZE BUTTON
+	local freezeBtn = Instance.new("TextButton")
+	freezeBtn.Name = "FreezeButton"
+	freezeBtn.Size = UDim2.new(0, 200, 0, 50)
+	freezeBtn.Position = UDim2.new(0.5, -100, 0.85, 0)
+	freezeBtn.Text = "FREEZE BOT"
+	freezeBtn.Font = Enum.Font.GothamBold
+	freezeBtn.TextSize = 24
+	freezeBtn.TextColor3 = Color3.new(1,1,1)
+	freezeBtn.BackgroundColor3 = Color3.new(0, 0.4, 0.8)
+	freezeBtn.BorderSizePixel = 2
+	freezeBtn.BorderColor3 = Color3.new(1,1,1)
+	freezeBtn.Parent = sg
+	
+	local c1 = Instance.new("UICorner"); c1.CornerRadius = UDim.new(0, 8); c1.Parent = freezeBtn
+	
+	-- SPECTATE BUTTON
+	local spectateBtn = Instance.new("TextButton")
+	spectateBtn.Name = "SpectateButton"
+	spectateBtn.Size = UDim2.new(0, 200, 0, 50)
+	spectateBtn.Position = UDim2.new(0.5, -100, 0.85, -60) -- Stacked on top
+	spectateBtn.Text = "SPECTATE BOT"
+	spectateBtn.Font = Enum.Font.GothamBold
+	spectateBtn.TextSize = 24
+	spectateBtn.TextColor3 = Color3.new(1,1,1)
+	spectateBtn.BackgroundColor3 = Color3.new(0.5, 0, 0.8)
+	spectateBtn.BorderSizePixel = 2
+	spectateBtn.BorderColor3 = Color3.new(1,1,1)
+	spectateBtn.Parent = sg
+
+	local c2 = Instance.new("UICorner"); c2.CornerRadius = UDim.new(0, 8); c2.Parent = spectateBtn
+	
+	return freezeBtn, spectateBtn
+end
+
+-- 3. RIG BUILDER
+local function createNextbot(spawnPos)
+	local model = Instance.new("Model")
+	model.Name = "Nextbot_Glitch_V13_Pure"
+
+	local root = Instance.new("Part")
+	root.Name = "HumanoidRootPart"
+	root.Size = Vector3.new(2, 2, 1)
+	root.Position = spawnPos
+	root.Transparency = 1; root.CanCollide = false; root.Anchored = false; root.Parent = model
+	
+	local cd = Instance.new("ClickDetector")
+	cd.MaxActivationDistance = 500
+	cd.Parent = root
+
+	local torso = Instance.new("Part")
+	torso.Name = "Torso"; torso.Size = Vector3.new(2, 2, 1); torso.Transparency = 1; torso.CanCollide = false; torso.Parent = model
+
+	local head = Instance.new("Part")
+	head.Name = "Head"; head.Size = Vector3.new(7, 10, 1); head.Transparency = 0; head.Material = Enum.Material.Neon; head.Color = Color3.new(0,0,0); head.CanCollide = false; head.Parent = model
+
+	local chaseSound = Instance.new("Sound"); chaseSound.Name = "ChaseMusic"; chaseSound.SoundId = CONFIG.AUDIO_CHASE_ID; chaseSound.Looped = true; chaseSound.Volume = 0.6; chaseSound.RollOffMaxDistance = 200; chaseSound.Parent = root; chaseSound:Play()
+	local glitchSound = Instance.new("Sound"); glitchSound.Name = "GlitchSFX"; glitchSound.SoundId = CONFIG.AUDIO_GLITCH_ID; glitchSound.Volume = 0.8; glitchSound.Parent = root
+	local screamSound = Instance.new("Sound"); screamSound.Name = "Scream"; screamSound.SoundId = CONFIG.AUDIO_JUMPSCARE_ID; screamSound.Volume = 1; screamSound.Parent = root
+
+	local w1 = Instance.new("Motor6D"); w1.Part0 = root; w1.Part1 = torso; w1.Parent = root
+	local w2 = Instance.new("Motor6D"); w2.Part0 = torso; w2.Part1 = head; w2.C0 = CFrame.new(0, 5, 0); w2.Parent = torso
+
+	local sGui = Instance.new("SurfaceGui"); sGui.Face = Enum.NormalId.Front; sGui.Parent = head
+	local img = Instance.new("ImageLabel"); img.Name = "Face"; img.Size = UDim2.new(1, 0, 1, 0); img.BackgroundTransparency = 1; img.Image = CONFIG.IMAGE_ID; img.Parent = sGui
+	local sGuiBack = sGui:Clone(); sGuiBack.Face = Enum.NormalId.Back; sGuiBack.Parent = head
+
+	local billboard = Instance.new("BillboardGui"); billboard.Size = UDim2.new(0, 200, 0, 50); billboard.StudsOffset = Vector3.new(0, 12, 0); billboard.AlwaysOnTop = true; billboard.Parent = model
+	local label = Instance.new("TextLabel"); label.Name = "StatsLabel"; label.Size = UDim2.new(1, 0, 1, 0); label.BackgroundTransparency = 1; label.Text = "KILLS: " .. SCORE; label.TextColor3 = Color3.new(1, 0.2, 0.2); label.TextScaled = true; label.Font = Enum.Font.Code; label.Parent = billboard
+
+	local humanoid = Instance.new("Humanoid"); humanoid.WalkSpeed = CONFIG.CONSTANT_SPEED; humanoid.UseJumpPower = true; humanoid.JumpPower = CONFIG.BASE_JUMP; humanoid.MaxHealth = 10000; humanoid.HipHeight = 2; humanoid.Parent = model
+
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+
+	local align = Instance.new("AlignOrientation"); align.Mode = Enum.OrientationAlignmentMode.OneAttachment; align.RigidityEnabled = false; align.Responsiveness = 200; align.Attachment0 = Instance.new("Attachment", root); align.Parent = root
+
+	pcall(function() root:SetNetworkOwner(nil) end)
+	model.Parent = workspace
+	return model, root, humanoid, align, img, head, cd
+end
+
+-- 4. HELPER: VISUALIZATION
+local function visualizeWaypoints(waypoints)
+	if not CONFIG.SHOW_WAYPOINTS then return end
+	for _, c in ipairs(workspace:GetChildren()) do if c.Name == "PathVisualV12" then c:Destroy() end end
+	for i, waypoint in ipairs(waypoints) do
+		if i % 2 == 0 then
+			local part = Instance.new("Part"); part.Name = "PathVisualV12"; part.Shape = Enum.PartType.Ball; part.Material = Enum.Material.Neon; part.Size = Vector3.new(0.6, 0.6, 0.6); part.Position = waypoint.Position; part.Anchored = true; part.CanCollide = false; part.BrickColor = CONFIG.WAYPOINT_COLOR; part.Parent = workspace; Debris:AddItem(part, 1.5)
+		end
+	end
+end
+
+-- 5. ENVIRONMENT LOGIC
+local function hasClearLineOfSight(startPos, endPos, ignoreList)
+	RAY_PARAMS.FilterDescendantsInstances = ignoreList
+	local dir = endPos - startPos
+	local dist = dir.Magnitude
+	if dist > 250 then return false end 
+	
+	if math.abs(startPos.Y - endPos.Y) > 8 then return false end
+
+	local result = workspace:Raycast(startPos, dir, RAY_PARAMS)
+	if result then return false end
+	
+	local cframe = CFrame.lookAt(startPos, endPos)
+	local right = cframe.RightVector * 1.5 
+	
+	if workspace:Raycast(startPos + right, dir, RAY_PARAMS) then return false end
+	if workspace:Raycast(startPos - right, dir, RAY_PARAMS) then return false end
+
+	return true
+end
+
+local function optimizePath(currentIdx, waypoints, botPos, ignoreList)
+	local bestIdx = currentIdx
+	local limit = math.min(#waypoints, currentIdx + 10) 
+	
+	for i = limit, currentIdx + 1, -1 do
+		local wp = waypoints[i]
+		if math.abs(wp.Position.Y - botPos.Y) < 6 then
+			if hasClearLineOfSight(botPos, wp.Position, ignoreList) then
+				bestIdx = i
+				break
+			end
+		end
+	end
+	return bestIdx
+end
+
+local function analyseTerrainAndObstacles(botRoot, humanoid, ignoreList)
+	local rayDown = RaycastParams.new(); rayDown.FilterDescendantsInstances = ignoreList; rayDown.FilterType = Enum.RaycastFilterType.Exclude
+	local floorHit = workspace:Raycast(botRoot.Position, Vector3.new(0, -5, 0), rayDown)
+	
+	local multiplier = 1
+	if floorHit then
+		local mat = floorHit.Material
+		if CONFIG.SPEED_BOOST_MATS[mat] then multiplier = CONFIG.SPEED_BOOST_MATS[mat] end
+		if CONFIG.SPEED_SLOW_MATS[mat] then multiplier = CONFIG.SPEED_SLOW_MATS[mat] end
+	end
+	
+	humanoid.WalkSpeed = CONFIG.CONSTANT_SPEED * multiplier
+
+	local lookDir = botRoot.CFrame.LookVector * 4.5
+	local wallHit = workspace:Raycast(botRoot.Position, lookDir, rayDown)
+	
+	if wallHit and wallHit.Instance and not wallHit.Instance.Anchored and wallHit.Instance.CanCollide then
+		wallHit.Instance:ApplyImpulse(lookDir * 4000 + Vector3.new(0, 1500, 0))
+	end
+end
+
+-- [[ STOCKFISH CALCULATOR ]]
+local function calculateGrandmasterMove(botRoot, playerRoot, ignoreList)
+	local vel = playerRoot.AssemblyLinearVelocity * Vector3.new(1,0,1)
+	local speed = vel.Magnitude
+	
+	if (playerRoot.Position.Y - botRoot.Position.Y) > 8 then
+		return nil, "HIGH GROUND"
+	end
+
+	local linearPos = playerRoot.Position + (vel * CONFIG.PREDICTION_FACTOR)
+	
+	if speed < 5 then return linearPos, "MATE IN 1" end
+	
+	-- Wall Reflection (Corner Trap)
+	RAY_PARAMS.FilterDescendantsInstances = ignoreList
+	local forwardRay = workspace:Raycast(playerRoot.Position, vel.Unit * CONFIG.WALL_READ_DIST, RAY_PARAMS)
+	
+	if forwardRay and forwardRay.Instance then
+		local normal = forwardRay.Normal
+		local incoming = vel.Unit
+		local reflection = incoming - (2 * incoming:Dot(normal) * normal)
+		local trapPos = forwardRay.Position + (reflection * 10) -- Aim for the bounce
+		return trapPos, "CORNER TRAP"
+	end
+	
+	return linearPos, "CHASING"
+end
+
+-- 6. MAIN AI LOOP
+task.spawn(function()
+	task.wait(1) 
+	
+	local player = Players:GetPlayers()[1] or Players.PlayerAdded:Wait()
+	if not player.Character then player.CharacterAdded:Wait() end
+	local targetRoot = player.Character:WaitForChild("HumanoidRootPart")
+	
+	local startPos = targetRoot.Position + Vector3.new(CONFIG.SPAWN_DIST, 5, 0)
+	local bot, botRoot, botHum, botAlign, botImg, botHead, clickDetector = createNextbot(startPos)
+	print("GENIUS BOT V13.17 ONLINE - SPECTATOR MODE")
+
+	-- [[ GUI CONNECTION ]]
+	local freezeBtn, spectateBtn = createControlGui(player)
+	
+	local function toggleFreeze()
+		IS_FROZEN = not IS_FROZEN
+		if IS_FROZEN then
+			freezeBtn.Text = "UNFREEZE BOT"
+			freezeBtn.BackgroundColor3 = Color3.new(0.8, 0, 0)
+			local s = botRoot:FindFirstChild("GlitchSFX"); if s then s:Stop() end
+		else
+			freezeBtn.Text = "FREEZE BOT"
+			freezeBtn.BackgroundColor3 = Color3.new(0, 0.4, 0.8)
+		end
+	end
+	
+	local function toggleSpectate()
+		IS_SPECTATING = not IS_SPECTATING
+		local cam = workspace.CurrentCamera
+		if IS_SPECTATING then
+			spectateBtn.Text = "STOP SPECTATING"
+			spectateBtn.BackgroundColor3 = Color3.new(0.8, 0, 0)
+			cam.CameraSubject = botHum
+		else
+			spectateBtn.Text = "SPECTATE BOT"
+			spectateBtn.BackgroundColor3 = Color3.new(0.5, 0, 0.8)
+			if player.Character and player.Character:FindFirstChild("Humanoid") then
+				cam.CameraSubject = player.Character.Humanoid
+			end
+		end
+	end
+
+	-- Connect Events
+	freezeBtn.MouseButton1Click:Connect(toggleFreeze)
+	spectateBtn.MouseButton1Click:Connect(toggleSpectate)
+	clickDetector.MouseClick:Connect(toggleFreeze)
+
+	local waypoints = {}
+	local currentPointIndex = 2
+	local lastPathTime = 0
+	local lastTargetPos = targetRoot.Position
+	local isComputing = false
+	local forceRepath = false
+	
+	local lastStuckCheck = tick()
+	local lastStuckPos = botRoot.Position
+	local stuckCount = 0
+	
+	-- [[ APEX NAVIGATION SETTINGS ]]
+	local path = PathfindingService:CreatePath({
+		AgentRadius = 2.5, 
+		AgentHeight = 6.0, 
+		AgentCanJump = true,
+		WaypointSpacing = 2.0, 
+		Costs = { Water = 50 } 
+	})
+
+	path.Blocked:Connect(function(blockedWaypointIdx)
+		if blockedWaypointIdx >= currentPointIndex then forceRepath = true end
+	end)
+	
+	-- GLITCH STATE VARIABLES
+	local noiseSeed = math.random(10000)
+
+	RunService.Heartbeat:Connect(function(dt)
+		local statsLabel = botRoot.Parent:FindFirstChild("BillboardGui"):FindFirstChild("StatsLabel")
+		
+		-- [[ FREEZE LOGIC ]]
+		if IS_FROZEN then
+			botHum:MoveTo(botRoot.Position) -- Halt Movement
+			botAlign.CFrame = botRoot.CFrame -- Halt Glitching
+			if statsLabel then 
+				statsLabel.Text = "SYSTEM FROZEN"
+				statsLabel.TextColor3 = Color3.new(0, 1, 1)
+			end
+			return -- SKIP EVERYTHING ELSE
+		end
+
+		if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then
+			local p = Players:GetPlayers()[1]
+			if p and p.Character then 
+				player = p
+				targetRoot = p.Character:FindFirstChild("HumanoidRootPart")
+			end
+			return
+		end
+		
+		targetRoot = player.Character.HumanoidRootPart
+		local targetHum = player.Character:FindFirstChild("Humanoid")
+		if not targetHum or targetHum.Health <= 0 then return end
+		if not botRoot then return end
+		
+		local ignoreList = {bot, player.Character}
+		
+		-- [[ ANALYSE WORLD ]]
+		analyseTerrainAndObstacles(botRoot, botHum, ignoreList)
+		
+		local dist = (botRoot.Position - targetRoot.Position).Magnitude
+		
+		-- ========================================================================
+		-- [[ UPGRADED SHATTERED REALITY GLITCH ]]
+		-- ========================================================================
+		
+		-- Intensity scales exponentially closer to player
+		local intensity = math.clamp((70 - dist) / 2.5, 1, 25)
+		local t = tick()
+		
+		local lookTarget = waypoints and waypoints[currentPointIndex] and waypoints[currentPointIndex].Position or targetRoot.Position
+		local baseCFrame = CFrame.lookAt(botRoot.Position, Vector3.new(lookTarget.X, botRoot.Position.Y, lookTarget.Z))
+		
+		-- 1. The "Electronic" Snap (Perlin Noise + Hard Snaps)
+		local snapChance = (0.05 * intensity) -- Chance increases with intensity
+		if math.random() < (snapChance / 20) then
+			-- Hard aggressive snap
+			local snapX = math.rad(math.random(-45, 45))
+			local snapY = math.rad(math.random(-180, 180))
+			baseCFrame = baseCFrame * CFrame.Angles(snapX, snapY, 0)
+			
+			-- Audio glitch trigger
+			if math.random() < 0.4 then
+				local s = botRoot:FindFirstChild("GlitchSFX")
+				if s then 
+					s.TimePosition = math.random() * 0.5
+					s.Pitch = math.random(5, 20) / 10 
+					s:Play()
+				end
+			end
+		else
+			-- Subtle digital vibration using Perlin Noise
+			local nX = math.noise(t * 8, noiseSeed, 0) * (intensity / 10)
+			local nY = math.noise(t * 8, noiseSeed, 100) * (intensity / 10)
+			local nZ = math.noise(t * 8, noiseSeed, 200) * (intensity / 5)
+			baseCFrame = baseCFrame * CFrame.Angles(nX, nY, nZ)
+		end
+
+		-- 2. Texture Phasing & Chromatic Glitch
+		if math.random() < (0.08 * intensity) then
+			-- Flash bright colors (Cyan/Purple/Red/Invert)
+			local rng = math.random()
+			if rng > 0.7 then
+				botImg.ImageColor3 = Color3.new(0, 1, 1) -- Cyan
+			elseif rng > 0.4 then
+				botImg.ImageColor3 = Color3.new(1, 0, 1) -- Magenta
+			else
+				botImg.ImageColor3 = Color3.new(1, 0, 0) -- Red
+			end
+			botHead.Transparency = math.random(3, 8) / 10
+		else
+			-- Return to normal
+			botImg.ImageColor3 = Color3.new(1,1,1)
+			botHead.Transparency = 0
+			botHead.Color = Color3.new(0,0,0)
+		end
+
+		-- 3. Spatial Tearing & Size Distortion (New!)
+		if intensity > 5 and math.random() < 0.3 then
+			-- Randomly stretch the mesh
+			local scaleNoise = math.noise(t * 15, 500) * (intensity / 8)
+			botHead.Size = Vector3.new(7 + scaleNoise, 10 + scaleNoise, 1 + (scaleNoise/2))
+		else
+			botHead.Size = Vector3.new(7, 10, 1)
+		end
+
+		-- Position Jitter (Using noise for "electric" feel)
+		local jitterScale = 0.2 * intensity
+		local jitterX = (math.random() - 0.5) * jitterScale
+		local jitterY = (math.random() - 0.5) * jitterScale
+		local jitterZ = (math.random() - 0.5) * jitterScale
+		
+		local electricRoll = math.rad(math.sin(t * 50) * (4 * intensity))
+
+		botAlign.CFrame = baseCFrame * CFrame.Angles(0, 0, electricRoll) + Vector3.new(jitterX, jitterY, jitterZ)
+		
+		-- ========================================================================
+
+		-- [[ KILL CHECK + SCORING ]]
+		if dist < CONFIG.KILL_DIST then
+			local s = botRoot:FindFirstChild("Scream"); if s then s:Play() end
+			triggerRagdoll(player.Character)
+			targetHum.Health = 0
+			
+			SCORE = SCORE + 1
+			if statsLabel then
+				statsLabel.Text = "KILLS: " .. SCORE
+				statsLabel.TextColor3 = Color3.new(1, 0, 0) 
+				task.delay(0.5, function()
+					if not IS_FROZEN then statsLabel.TextColor3 = Color3.new(1, 0.2, 0.2) end
+				end)
+			end
+		end
+		
+		-- [[ AUTO JUMP ]]
+		local moveVel = botRoot.AssemblyLinearVelocity
+		local flatVel = moveVel * Vector3.new(1,0,1)
+		if flatVel.Magnitude > 10 then
+			local kneeRay = workspace:Raycast(botRoot.Position - Vector3.new(0, 2, 0), flatVel.Unit * 4, RAY_PARAMS)
+			if kneeRay and kneeRay.Instance then
+				botHum.Jump = true
+			end
+		end
+		
+		-- [[ STUCK MONITOR ]]
+		if tick() - lastStuckCheck > 0.35 then
+			if (botRoot.Position - lastStuckPos).Magnitude < 0.5 then
+				stuckCount += 1
+				botHum.Jump = true
+				if stuckCount > 2 then
+					botRoot.CFrame = botRoot.CFrame + Vector3.new(0, 4, 0) + (botRoot.CFrame.LookVector * 4)
+					stuckCount = 0; forceRepath = true
+				end
+			else
+				stuckCount = 0
+			end
+			lastStuckPos = botRoot.Position; lastStuckCheck = tick()
+		end
+
+		-- [[ STOCKFISH ENGINE ]]
+		local bestMovePos, moveName = calculateGrandmasterMove(botRoot, targetRoot, ignoreList)
+		
+		local canSeePrediction = false
+		if bestMovePos then
+			canSeePrediction = hasClearLineOfSight(botRoot.Position, bestMovePos, ignoreList)
+		end
+
+		if canSeePrediction and bestMovePos then
+			botHum:MoveTo(bestMovePos)
+			waypoints = nil 
+			if statsLabel and statsLabel.TextColor3 ~= Color3.new(1, 0, 0) then
+				statsLabel.Text = "KILLS: " .. SCORE
+			end
+		else
+			if statsLabel and statsLabel.TextColor3 ~= Color3.new(1, 0, 0) then
+				statsLabel.Text = "KILLS: " .. SCORE
+			end
+			
+			local targetMoved = (targetRoot.Position - lastTargetPos).Magnitude > 2
+			local pathExpired = (tick() - lastPathTime > 0.1)
+
+			if (targetMoved or pathExpired or forceRepath or waypoints == nil) and not isComputing then
+				isComputing = true; forceRepath = false
+				lastPathTime = tick(); lastTargetPos = targetRoot.Position
+				
+				task.spawn(function()
+					local success, _ = pcall(function() path:ComputeAsync(botRoot.Position, targetRoot.Position) end)
+					if success and path.Status == Enum.PathStatus.Success then
+						local newPoints = path:GetWaypoints()
+						if #newPoints > 0 then
+							waypoints = newPoints; currentPointIndex = 2; visualizeWaypoints(waypoints)
+						end
+					end
+					isComputing = false
+				end)
+			end
+
+			if waypoints and currentPointIndex <= #waypoints then
+				currentPointIndex = optimizePath(currentPointIndex, waypoints, botRoot.Position, ignoreList)
+				local targetPoint = waypoints[currentPointIndex]
+				botHum:MoveTo(targetPoint.Position)
+				if targetPoint.Action == Enum.PathWaypointAction.Jump then botHum.Jump = true end
+				
+				local currentSpeed = botRoot.AssemblyLinearVelocity.Magnitude
+				local arrivalRadius = math.clamp(currentSpeed * 0.05, 1.5, 4) 
+				
+				local vecToPoint = (targetPoint.Position - botRoot.Position) * Vector3.new(1,0,1)
+				if vecToPoint.Magnitude < arrivalRadius and math.abs(targetPoint.Position.Y - botRoot.Position.Y) < 8 then
+					currentPointIndex = currentPointIndex + 1
+				end
+			end
+		end
+	end)
+end)
