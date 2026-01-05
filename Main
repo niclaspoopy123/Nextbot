@@ -21,7 +21,14 @@ local CONFIG = {
 	
 	-- Stockfish Logic
 	PREDICTION_FACTOR = 0.8,
-	WALL_READ_DIST = 25, 
+	WALL_READ_DIST = 25,
+	CORNER_TRAP_MAX_DIST = 150,
+	
+	-- Unstuck Mechanics
+	UNSTUCK_VELOCITY_UP = 25,
+	UNSTUCK_VELOCITY_FORWARD = 15,
+	JUMP_BOOST_VELOCITY = 15,
+	JUMP_MOMENTUM_BOOST = 8, 
 	
 	-- World Analysis
 	SPEED_BOOST_MATS = { [Enum.Material.Neon] = 1.5, [Enum.Material.Ice] = 1.3 },
@@ -254,7 +261,7 @@ local function calculateGrandmasterMove(botRoot, playerRoot, ignoreList)
 		local trapPos = forwardRay.Position + (reflection * 12) -- Aim for the bounce
 		
 		-- Check if we can reach the trap position
-		if (trapPos - botRoot.Position).Magnitude < 150 then
+		if (trapPos - botRoot.Position).Magnitude < CONFIG.CORNER_TRAP_MAX_DIST then
 			return trapPos, "CORNER TRAP"
 		end
 	end
@@ -488,7 +495,7 @@ task.spawn(function()
 				-- Extra boost for high obstacles
 				if kneeRay.Instance.Size.Y > 4 then
 					task.delay(0.05, function()
-						botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + Vector3.new(0, 15, 0)
+						botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + Vector3.new(0, CONFIG.JUMP_BOOST_VELOCITY, 0)
 					end)
 				end
 			end
@@ -501,7 +508,7 @@ task.spawn(function()
 				botHum.Jump = true
 				if stuckCount > 1 then
 					-- Aggressive unstuck: boost upward and forward
-					botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + Vector3.new(0, 25, 0) + (botRoot.CFrame.LookVector * 15)
+					botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + Vector3.new(0, CONFIG.UNSTUCK_VELOCITY_UP, 0) + (botRoot.CFrame.LookVector * CONFIG.UNSTUCK_VELOCITY_FORWARD)
 					stuckCount = 0; forceRepath = true
 				end
 			else
@@ -562,7 +569,7 @@ task.spawn(function()
 					-- Extra momentum for jumps
 					if dist > 20 then
 						task.delay(0.03, function()
-							botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + (botRoot.CFrame.LookVector * 8)
+							botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + (botRoot.CFrame.LookVector * CONFIG.JUMP_MOMENTUM_BOOST)
 						end)
 					end
 				end
