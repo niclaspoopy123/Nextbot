@@ -20,16 +20,8 @@ local CONFIG = {
 	BASE_JUMP = 60,
 	
 	-- Stockfish Logic
-	PREDICTION_FACTOR = 0.8,
-	WALL_READ_DIST = 25,
-	CORNER_TRAP_MAX_DIST = 150, -- Maximum distance to attempt corner trap prediction
-	
-	-- Unstuck Mechanics
-	UNSTUCK_VELOCITY_UP = 25,
-	UNSTUCK_VELOCITY_FORWARD = 15,
-	JUMP_BOOST_VELOCITY = 15,
-	JUMP_MOMENTUM_BOOST = 8,
-	HIGH_OBSTACLE_THRESHOLD = 4, -- Studs height to trigger extra jump boost 
+	PREDICTION_FACTOR = 0.6,
+	WALL_READ_DIST = 20, 
 	
 	-- World Analysis
 	SPEED_BOOST_MATS = { [Enum.Material.Neon] = 1.5, [Enum.Material.Ice] = 1.3 },
@@ -197,11 +189,11 @@ end
 
 local function optimizePath(currentIdx, waypoints, botPos, ignoreList)
 	local bestIdx = currentIdx
-	local limit = math.min(#waypoints, currentIdx + 15) 
+	local limit = math.min(#waypoints, currentIdx + 10) 
 	
 	for i = limit, currentIdx + 1, -1 do
 		local wp = waypoints[i]
-		if math.abs(wp.Position.Y - botPos.Y) < 10 then
+		if math.abs(wp.Position.Y - botPos.Y) < 6 then
 			if hasClearLineOfSight(botPos, wp.Position, ignoreList) then
 				bestIdx = i
 				break
@@ -241,17 +233,11 @@ local function calculateGrandmasterMove(botRoot, playerRoot, ignoreList)
 		return nil, "HIGH GROUND"
 	end
 
-	-- Dynamic prediction based on speed
-	local predictionTime = CONFIG.PREDICTION_FACTOR
-	if speed > 30 then
-		predictionTime = predictionTime * 1.3 -- Predict further ahead for fast targets
-	end
-	
-	local linearPos = playerRoot.Position + (vel * predictionTime)
+	local linearPos = playerRoot.Position + (vel * CONFIG.PREDICTION_FACTOR)
 	
 	if speed < 5 then return linearPos, "MATE IN 1" end
 	
-	-- Wall Reflection (Corner Trap) - Enhanced
+	-- Wall Reflection (Corner Trap)
 	RAY_PARAMS.FilterDescendantsInstances = ignoreList
 	local forwardRay = workspace:Raycast(playerRoot.Position, vel.Unit * CONFIG.WALL_READ_DIST, RAY_PARAMS)
 	
@@ -259,12 +245,8 @@ local function calculateGrandmasterMove(botRoot, playerRoot, ignoreList)
 		local normal = forwardRay.Normal
 		local incoming = vel.Unit
 		local reflection = incoming - (2 * incoming:Dot(normal) * normal)
-		local trapPos = forwardRay.Position + (reflection * 12) -- Aim for the bounce
-		
-		-- Check if we can reach the trap position
-		if (trapPos - botRoot.Position).Magnitude < CONFIG.CORNER_TRAP_MAX_DIST then
-			return trapPos, "CORNER TRAP"
-		end
+		local trapPos = forwardRay.Position + (reflection * 10) -- Aim for the bounce
+		return trapPos, "CORNER TRAP"
 	end
 	
 	return linearPos, "CHASING"
@@ -331,16 +313,11 @@ task.spawn(function()
 	
 	-- [[ APEX NAVIGATION SETTINGS ]]
 	local path = PathfindingService:CreatePath({
-		AgentRadius = 2.0, 
+		AgentRadius = 2.5, 
 		AgentHeight = 6.0, 
 		AgentCanJump = true,
-		AgentCanClimb = true,
-		WaypointSpacing = 1.5, 
-		Costs = { 
-			Water = 20,
-			DangerDetector = 99999, -- Avoid danger zones
-			Door = 1
-		}
+		WaypointSpacing = 2.0, 
+		Costs = { Water = 50 } 
 	})
 
 	path.Blocked:Connect(function(blockedWaypointIdx)
@@ -390,58 +367,49 @@ task.spawn(function()
 		-- ========================================================================
 		
 		-- Intensity scales exponentially closer to player
-		local intensity = math.clamp((80 - dist) / 2.2, 1, 30)
+		local intensity = math.clamp((70 - dist) / 2.5, 1, 25)
 		local t = tick()
 		
 		local lookTarget = waypoints and waypoints[currentPointIndex] and waypoints[currentPointIndex].Position or targetRoot.Position
 		local baseCFrame = CFrame.lookAt(botRoot.Position, Vector3.new(lookTarget.X, botRoot.Position.Y, lookTarget.Z))
 		
-		-- 1. The "Electronic" Snap (Perlin Noise + Hard Snaps) - Enhanced
-		local snapChance = (0.06 * intensity) -- Chance increases with intensity
-		if math.random() < (snapChance / 18) then
+		-- 1. The "Electronic" Snap (Perlin Noise + Hard Snaps)
+		local snapChance = (0.05 * intensity) -- Chance increases with intensity
+		if math.random() < (snapChance / 20) then
 			-- Hard aggressive snap
-			local snapX = math.rad(math.random(-60, 60))
+			local snapX = math.rad(math.random(-45, 45))
 			local snapY = math.rad(math.random(-180, 180))
 			baseCFrame = baseCFrame * CFrame.Angles(snapX, snapY, 0)
 			
 			-- Audio glitch trigger
-			if math.random() < 0.5 then
+			if math.random() < 0.4 then
 				local s = botRoot:FindFirstChild("GlitchSFX")
 				if s then 
 					s.TimePosition = math.random() * 0.5
-					s.Pitch = math.random(5, 25) / 10 
+					s.Pitch = math.random(5, 20) / 10 
 					s:Play()
 				end
 			end
 		else
 			-- Subtle digital vibration using Perlin Noise
-			local nX = math.noise(t * 10, noiseSeed, 0) * (intensity / 8)
-			local nY = math.noise(t * 10, noiseSeed, 100) * (intensity / 8)
-			local nZ = math.noise(t * 10, noiseSeed, 200) * (intensity / 4)
+			local nX = math.noise(t * 8, noiseSeed, 0) * (intensity / 10)
+			local nY = math.noise(t * 8, noiseSeed, 100) * (intensity / 10)
+			local nZ = math.noise(t * 8, noiseSeed, 200) * (intensity / 5)
 			baseCFrame = baseCFrame * CFrame.Angles(nX, nY, nZ)
 		end
 
-		-- 2. Texture Phasing & Chromatic Glitch - Enhanced
-		if math.random() < (0.1 * intensity) then
-			-- Flash bright colors (Cyan/Purple/Red/Invert/White)
+		-- 2. Texture Phasing & Chromatic Glitch
+		if math.random() < (0.08 * intensity) then
+			-- Flash bright colors (Cyan/Purple/Red/Invert)
 			local rng = math.random()
-			if rng > 0.8 then
+			if rng > 0.7 then
 				botImg.ImageColor3 = Color3.new(0, 1, 1) -- Cyan
-			elseif rng > 0.6 then
-				botImg.ImageColor3 = Color3.new(1, 0, 1) -- Magenta
 			elseif rng > 0.4 then
-				botImg.ImageColor3 = Color3.new(1, 0, 0) -- Red
-			elseif rng > 0.2 then
-				botImg.ImageColor3 = Color3.new(1, 1, 0) -- Yellow
+				botImg.ImageColor3 = Color3.new(1, 0, 1) -- Magenta
 			else
-				botImg.ImageColor3 = Color3.new(1, 1, 1) -- White Flash
+				botImg.ImageColor3 = Color3.new(1, 0, 0) -- Red
 			end
-			botHead.Transparency = math.random(2, 9) / 10
-			-- Extreme close range: add color to head
-			if intensity > 15 then
-				local headColors = {Color3.new(1, 0, 0), Color3.new(0, 1, 1), Color3.new(1, 0, 1)}
-				botHead.Color = headColors[math.random(1, #headColors)]
-			end
+			botHead.Transparency = math.random(3, 8) / 10
 		else
 			-- Return to normal
 			botImg.ImageColor3 = Color3.new(1,1,1)
@@ -449,22 +417,22 @@ task.spawn(function()
 			botHead.Color = Color3.new(0,0,0)
 		end
 
-		-- 3. Spatial Tearing & Size Distortion - Enhanced
-		if intensity > 4 and math.random() < 0.35 then
-			-- Randomly stretch the mesh more aggressively
-			local scaleNoise = math.noise(t * 18, 500) * (intensity / 6)
-			botHead.Size = Vector3.new(7 + scaleNoise * 1.5, 10 + scaleNoise * 1.5, 1 + (scaleNoise/2))
+		-- 3. Spatial Tearing & Size Distortion (New!)
+		if intensity > 5 and math.random() < 0.3 then
+			-- Randomly stretch the mesh
+			local scaleNoise = math.noise(t * 15, 500) * (intensity / 8)
+			botHead.Size = Vector3.new(7 + scaleNoise, 10 + scaleNoise, 1 + (scaleNoise/2))
 		else
 			botHead.Size = Vector3.new(7, 10, 1)
 		end
 
-		-- Position Jitter (Using noise for "electric" feel) - Enhanced
-		local jitterScale = 0.25 * intensity
+		-- Position Jitter (Using noise for "electric" feel)
+		local jitterScale = 0.2 * intensity
 		local jitterX = (math.random() - 0.5) * jitterScale
 		local jitterY = (math.random() - 0.5) * jitterScale
 		local jitterZ = (math.random() - 0.5) * jitterScale
 		
-		local electricRoll = math.rad(math.sin(t * 60) * (5 * intensity))
+		local electricRoll = math.rad(math.sin(t * 50) * (4 * intensity))
 
 		botAlign.CFrame = baseCFrame * CFrame.Angles(0, 0, electricRoll) + Vector3.new(jitterX, jitterY, jitterZ)
 		
@@ -489,27 +457,20 @@ task.spawn(function()
 		-- [[ AUTO JUMP ]]
 		local moveVel = botRoot.AssemblyLinearVelocity
 		local flatVel = moveVel * Vector3.new(1,0,1)
-		if flatVel.Magnitude > 8 then
-			local kneeRay = workspace:Raycast(botRoot.Position - Vector3.new(0, 2, 0), flatVel.Unit * 5, RAY_PARAMS)
+		if flatVel.Magnitude > 10 then
+			local kneeRay = workspace:Raycast(botRoot.Position - Vector3.new(0, 2, 0), flatVel.Unit * 4, RAY_PARAMS)
 			if kneeRay and kneeRay.Instance then
 				botHum.Jump = true
-				-- Extra boost for high obstacles
-				if kneeRay.Instance.Size.Y > CONFIG.HIGH_OBSTACLE_THRESHOLD then
-					task.delay(0.05, function()
-						botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + Vector3.new(0, CONFIG.JUMP_BOOST_VELOCITY, 0)
-					end)
-				end
 			end
 		end
 		
 		-- [[ STUCK MONITOR ]]
-		if tick() - lastStuckCheck > 0.25 then
-			if (botRoot.Position - lastStuckPos).Magnitude < 0.8 then
+		if tick() - lastStuckCheck > 0.35 then
+			if (botRoot.Position - lastStuckPos).Magnitude < 0.5 then
 				stuckCount += 1
 				botHum.Jump = true
-				if stuckCount > 1 then
-					-- Aggressive unstuck: boost upward and forward
-					botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + Vector3.new(0, CONFIG.UNSTUCK_VELOCITY_UP, 0) + (botRoot.CFrame.LookVector * CONFIG.UNSTUCK_VELOCITY_FORWARD)
+				if stuckCount > 2 then
+					botRoot.CFrame = botRoot.CFrame + Vector3.new(0, 4, 0) + (botRoot.CFrame.LookVector * 4)
 					stuckCount = 0; forceRepath = true
 				end
 			else
@@ -537,10 +498,8 @@ task.spawn(function()
 				statsLabel.Text = "KILLS: " .. SCORE
 			end
 			
-			local targetMoved = (targetRoot.Position - lastTargetPos).Magnitude > 3
-			-- Adaptive path refresh rate based on distance
-			local refreshRate = dist < 30 and 0.08 or 0.15
-			local pathExpired = (tick() - lastPathTime > refreshRate)
+			local targetMoved = (targetRoot.Position - lastTargetPos).Magnitude > 2
+			local pathExpired = (tick() - lastPathTime > 0.1)
 
 			if (targetMoved or pathExpired or forceRepath or waypoints == nil) and not isComputing then
 				isComputing = true; forceRepath = false
@@ -553,9 +512,6 @@ task.spawn(function()
 						if #newPoints > 0 then
 							waypoints = newPoints; currentPointIndex = 2; visualizeWaypoints(waypoints)
 						end
-					elseif path.Status == Enum.PathStatus.NoPath then
-						-- No path found, try direct approach
-						botHum:MoveTo(targetRoot.Position)
 					end
 					isComputing = false
 				end)
@@ -565,23 +521,13 @@ task.spawn(function()
 				currentPointIndex = optimizePath(currentPointIndex, waypoints, botRoot.Position, ignoreList)
 				local targetPoint = waypoints[currentPointIndex]
 				botHum:MoveTo(targetPoint.Position)
-				if targetPoint.Action == Enum.PathWaypointAction.Jump then 
-					botHum.Jump = true
-					-- Extra momentum for jumps
-					if dist > 20 then
-						task.delay(0.03, function()
-							botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + (botRoot.CFrame.LookVector * CONFIG.JUMP_MOMENTUM_BOOST)
-						end)
-					end
-				end
+				if targetPoint.Action == Enum.PathWaypointAction.Jump then botHum.Jump = true end
 				
 				local currentSpeed = botRoot.AssemblyLinearVelocity.Magnitude
-				-- Dynamic arrival radius based on speed and distance
-				local baseRadius = dist < 25 and 1.2 or 1.8
-				local arrivalRadius = math.clamp(currentSpeed * 0.06, baseRadius, 5) 
+				local arrivalRadius = math.clamp(currentSpeed * 0.05, 1.5, 4) 
 				
 				local vecToPoint = (targetPoint.Position - botRoot.Position) * Vector3.new(1,0,1)
-				if vecToPoint.Magnitude < arrivalRadius and math.abs(targetPoint.Position.Y - botRoot.Position.Y) < 10 then
+				if vecToPoint.Magnitude < arrivalRadius and math.abs(targetPoint.Position.Y - botRoot.Position.Y) < 8 then
 					currentPointIndex = currentPointIndex + 1
 				end
 			end
