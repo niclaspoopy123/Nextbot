@@ -22,13 +22,14 @@ local CONFIG = {
 	-- Stockfish Logic
 	PREDICTION_FACTOR = 0.8,
 	WALL_READ_DIST = 25,
-	CORNER_TRAP_MAX_DIST = 150,
+	CORNER_TRAP_MAX_DIST = 150, -- Maximum distance to attempt corner trap prediction
 	
 	-- Unstuck Mechanics
 	UNSTUCK_VELOCITY_UP = 25,
 	UNSTUCK_VELOCITY_FORWARD = 15,
 	JUMP_BOOST_VELOCITY = 15,
-	JUMP_MOMENTUM_BOOST = 8, 
+	JUMP_MOMENTUM_BOOST = 8,
+	HIGH_OBSTACLE_THRESHOLD = 4, -- Studs height to trigger extra jump boost 
 	
 	-- World Analysis
 	SPEED_BOOST_MATS = { [Enum.Material.Neon] = 1.5, [Enum.Material.Ice] = 1.3 },
@@ -337,7 +338,7 @@ task.spawn(function()
 		WaypointSpacing = 1.5, 
 		Costs = { 
 			Water = 20,
-			DangerDetector = math.huge,
+			DangerDetector = 99999, -- Avoid danger zones
 			Door = 1
 		}
 	})
@@ -493,7 +494,7 @@ task.spawn(function()
 			if kneeRay and kneeRay.Instance then
 				botHum.Jump = true
 				-- Extra boost for high obstacles
-				if kneeRay.Instance.Size.Y > 4 then
+				if kneeRay.Instance.Size.Y > CONFIG.HIGH_OBSTACLE_THRESHOLD then
 					task.delay(0.05, function()
 						botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + Vector3.new(0, CONFIG.JUMP_BOOST_VELOCITY, 0)
 					end)
