@@ -4,7 +4,7 @@ local RunService = game:GetService("RunService")
 local Debris = game:GetService("Debris")
 local Workspace = game:GetService("Workspace")
 
--- [[ GENIUS NEXTBOT V13.17 (SPECTATOR MODE) - ENHANCED GLITCH ]]
+-- [[ GENIUS NEXTBOT V14.0 (SPECTATOR MODE) - ADAPTIVE ML ENGINE ]]
 
 local CONFIG = {
 	-- Visuals
@@ -19,21 +19,37 @@ local CONFIG = {
 	CONSTANT_SPEED = 60, 
 	BASE_JUMP = 60,
 	
-	-- Stockfish Logic
+	-- ML Prediction Engine
 	PREDICTION_FACTOR = 0.8,
 	WALL_READ_DIST = 25,
-	CORNER_TRAP_MAX_DIST = 150, -- Maximum distance to attempt corner trap prediction
+	CORNER_TRAP_MAX_DIST = 150,
+	ML_HISTORY_SIZE = 60, -- Number of frames to track for pattern learning
+	ML_PATTERN_WEIGHT = 0.6, -- How much to weight learned patterns vs linear prediction
+	ML_ADAPTATION_RATE = 0.05, -- How fast the bot adapts to player behavior
+	FLANK_ANGLE = math.rad(45), -- Angle offset for flanking maneuvers
+	FLANK_DISTANCE_THRESHOLD = 40, -- Start flanking when farther than this
 	
 	-- Unstuck Mechanics
 	UNSTUCK_VELOCITY_UP = 25,
 	UNSTUCK_VELOCITY_FORWARD = 15,
 	JUMP_BOOST_VELOCITY = 15,
 	JUMP_MOMENTUM_BOOST = 8,
-	HIGH_OBSTACLE_THRESHOLD = 4, -- Studs height to trigger extra jump boost 
+	HIGH_OBSTACLE_THRESHOLD = 4,
+	TELEPORT_STUCK_THRESHOLD = 8, -- Stuck count before emergency teleport
 	
 	-- World Analysis
 	SPEED_BOOST_MATS = { [Enum.Material.Neon] = 1.5, [Enum.Material.Ice] = 1.3 },
 	SPEED_SLOW_MATS = { [Enum.Material.Sand] = 0.7, [Enum.Material.Grass] = 0.9 },
+	
+	-- Adaptive Difficulty
+	DIFFICULTY_SCALE_KILLS = 0.02, -- Speed increase per kill
+	DIFFICULTY_MAX_MULTIPLIER = 1.5, -- Maximum speed multiplier from difficulty
+	CHASE_ACCEL_CLOSE = 1.15, -- Speed boost when very close to target
+	
+	-- Audio
+	CHASE_VOLUME_MIN = 0.2,
+	CHASE_VOLUME_MAX = 1.0,
+	CHASE_AUDIO_RANGE = 100, -- Distance at which audio starts fading
 	
 	-- Debug
 	SHOW_WAYPOINTS = false, 
@@ -47,6 +63,184 @@ RAY_PARAMS.IgnoreWater = false
 local SCORE = 0 
 local IS_FROZEN = false 
 local IS_SPECTATING = false 
+
+-- [[ ML PATTERN MEMORY ]]
+-- Stores player movement history for pattern recognition
+local PlayerMemory = {
+	positions = {}, -- Ring buffer of positions
+	velocities = {}, -- Ring buffer of velocities
+	directions = {}, -- Ring buffer of movement direction changes
+	writeIndex = 1,
+	totalSamples = 0,
+	
+	-- Learned behaviors
+	avgTurnRate = 0, -- How often player changes direction
+	preferredEscapeDir = Vector3.zero, -- Which direction player tends to run
+	avgSpeed = 0,
+	dodgePattern = 0, -- 0 = no pattern, 1 = left-right, 2 = circular, 3 = random
+	lastDodgeTime = 0,
+	consecutiveEscapes = 0, -- Times player escaped after being close
+	
+	-- Adaptive weights
+	predictionAccuracy = 0.5, -- Running average of prediction accuracy
+	aggressionLevel = 0.5, -- How aggressive the bot should be (0-1)
+}
+
+local function recordPlayerState(position, velocity)
+	local mem = PlayerMemory
+	local idx = mem.writeIndex
+	
+	mem.positions[idx] = position
+	mem.velocities[idx] = velocity
+	
+	-- Calculate direction change
+	local prevIdx = idx - 1
+	if prevIdx < 1 then prevIdx = CONFIG.ML_HISTORY_SIZE end
+	
+	if mem.velocities[prevIdx] then
+		local prevVel = mem.velocities[prevIdx]
+		local currVel = velocity
+		if prevVel.Magnitude > 1 and currVel.Magnitude > 1 then
+			local dot = prevVel.Unit:Dot(currVel.Unit)
+			mem.directions[idx] = dot -- 1 = same dir, -1 = reversed
+		else
+			mem.directions[idx] = 1
+		end
+	end
+	
+	-- Update ring buffer
+	mem.writeIndex = (idx % CONFIG.ML_HISTORY_SIZE) + 1
+	mem.totalSamples = math.min(mem.totalSamples + 1, CONFIG.ML_HISTORY_SIZE)
+	
+	-- Update running averages
+	if mem.totalSamples > 5 then
+		-- Average turn rate (how much direction changes)
+		local turnSum = 0
+		local count = 0
+		for i = 1, mem.totalSamples do
+			if mem.directions[i] then
+				turnSum = turnSum + (1 - mem.directions[i])
+				count = count + 1
+			end
+		end
+		if count > 0 then
+			mem.avgTurnRate = mem.avgTurnRate * 0.95 + (turnSum / count) * 0.05
+		end
+		
+		-- Average speed
+		local speedSum = 0
+		local speedCount = 0
+		for i = 1, mem.totalSamples do
+			if mem.velocities[i] then
+				speedSum = speedSum + mem.velocities[i].Magnitude
+				speedCount = speedCount + 1
+			end
+		end
+		if speedCount > 0 then
+			mem.avgSpeed = mem.avgSpeed * 0.9 + (speedSum / speedCount) * 0.1
+		end
+		
+		-- Detect dodge patterns
+		if mem.avgTurnRate > 0.8 then
+			mem.dodgePattern = 1 -- Erratic/dodging
+		elseif mem.avgTurnRate > 0.4 then
+			mem.dodgePattern = 2 -- Moderate turns (circular)
+		else
+			mem.dodgePattern = 3 -- Running straight
+		end
+	end
+end
+
+local function predictWithML(botPos, playerPos, playerVel)
+	local mem = PlayerMemory
+	
+	if mem.totalSamples < 10 then
+		-- Not enough data, use basic linear prediction
+		return playerPos + playerVel * CONFIG.PREDICTION_FACTOR, "LEARNING"
+	end
+	
+	local speed = playerVel.Magnitude
+	if speed < 3 then
+		return playerPos, "STATIONARY"
+	end
+	
+	-- Base linear prediction
+	local linearPred = playerPos + playerVel * CONFIG.PREDICTION_FACTOR
+	
+	-- ML-enhanced prediction based on learned patterns
+	local mlPred = linearPred
+	
+	if mem.dodgePattern == 1 then
+		-- Player dodges a lot - predict they'll change direction
+		-- Use weighted average of recent direction changes to anticipate next move
+		local anticipatedTurn = mem.avgTurnRate * CONFIG.FLANK_ANGLE
+		local perpDir = Vector3.new(-playerVel.Unit.Z, 0, playerVel.Unit.X)
+		
+		-- Alternate prediction side based on recent pattern
+		local recentBias = 0
+		for i = math.max(1, mem.totalSamples - 5), mem.totalSamples do
+			if mem.directions[i] then
+				recentBias = recentBias + mem.directions[i]
+			end
+		end
+		local side = recentBias > 0 and -1 or 1
+		mlPred = linearPred + perpDir * (side * speed * 0.3 * mem.avgTurnRate)
+		
+	elseif mem.dodgePattern == 2 then
+		-- Circular movement - predict curve continuation
+		local recentPositions = {}
+		for i = math.max(1, mem.totalSamples - 10), mem.totalSamples do
+			if mem.positions[i] then
+				table.insert(recentPositions, mem.positions[i])
+			end
+		end
+		
+		if #recentPositions >= 3 then
+			-- Estimate curve direction from last 3 points
+			local p1 = recentPositions[#recentPositions - 2]
+			local p2 = recentPositions[#recentPositions - 1]
+			local p3 = recentPositions[#recentPositions]
+			local curve = (p3 - p2) - (p2 - p1)
+			mlPred = linearPred + curve * 2
+		end
+		
+	elseif mem.dodgePattern == 3 then
+		-- Running straight - predict further ahead and try to cut off
+		local cutoffFactor = 1.5
+		mlPred = playerPos + playerVel * (CONFIG.PREDICTION_FACTOR * cutoffFactor)
+	end
+	
+	-- Blend linear and ML predictions based on accuracy
+	local blendWeight = CONFIG.ML_PATTERN_WEIGHT * math.clamp(mem.predictionAccuracy, 0.2, 0.9)
+	local finalPred = linearPred:Lerp(mlPred, blendWeight)
+	
+	-- Aggression adjustment - if bot keeps failing, become more aggressive
+	if mem.aggressionLevel > 0.7 then
+		-- Aim slightly ahead of prediction
+		local toPlayer = (playerPos - botPos).Unit
+		finalPred = finalPred + toPlayer * (mem.aggressionLevel * 5)
+	end
+	
+	return finalPred, "ML_" .. tostring(mem.dodgePattern)
+end
+
+local function updatePredictionAccuracy(predictedPos, actualPos)
+	local mem = PlayerMemory
+	local error = (predictedPos - actualPos).Magnitude
+	local accuracy = math.clamp(1 - (error / 30), 0, 1)
+	mem.predictionAccuracy = mem.predictionAccuracy * (1 - CONFIG.ML_ADAPTATION_RATE) + accuracy * CONFIG.ML_ADAPTATION_RATE
+	
+	-- Adjust aggression based on consecutive escapes
+	if error > 15 then
+		mem.consecutiveEscapes = mem.consecutiveEscapes + 1
+		if mem.consecutiveEscapes > 5 then
+			mem.aggressionLevel = math.min(1, mem.aggressionLevel + 0.05)
+		end
+	else
+		mem.consecutiveEscapes = math.max(0, mem.consecutiveEscapes - 1)
+		mem.aggressionLevel = math.max(0.3, mem.aggressionLevel - 0.02)
+	end
+end
 
 -- 1. HELPER: RAGDOLL
 local function triggerRagdoll(character)
@@ -232,26 +426,24 @@ local function analyseTerrainAndObstacles(botRoot, humanoid, ignoreList)
 	end
 end
 
--- [[ STOCKFISH CALCULATOR ]]
+-- [[ ML-ENHANCED PREDICTION ENGINE ]]
 local function calculateGrandmasterMove(botRoot, playerRoot, ignoreList)
 	local vel = playerRoot.AssemblyLinearVelocity * Vector3.new(1,0,1)
 	local speed = vel.Magnitude
+	
+	-- Record state for ML learning
+	recordPlayerState(playerRoot.Position, vel)
 	
 	if (playerRoot.Position.Y - botRoot.Position.Y) > 8 then
 		return nil, "HIGH GROUND"
 	end
 
-	-- Dynamic prediction based on speed
-	local predictionTime = CONFIG.PREDICTION_FACTOR
-	if speed > 30 then
-		predictionTime = predictionTime * 1.3 -- Predict further ahead for fast targets
-	end
+	-- Use ML prediction engine
+	local mlPos, mlStatus = predictWithML(botRoot.Position, playerRoot.Position, vel)
 	
-	local linearPos = playerRoot.Position + (vel * predictionTime)
+	if speed < 5 then return playerRoot.Position, "MATE IN 1" end
 	
-	if speed < 5 then return linearPos, "MATE IN 1" end
-	
-	-- Wall Reflection (Corner Trap) - Enhanced
+	-- Wall Reflection (Corner Trap) - Enhanced with ML
 	RAY_PARAMS.FilterDescendantsInstances = ignoreList
 	local forwardRay = workspace:Raycast(playerRoot.Position, vel.Unit * CONFIG.WALL_READ_DIST, RAY_PARAMS)
 	
@@ -259,15 +451,26 @@ local function calculateGrandmasterMove(botRoot, playerRoot, ignoreList)
 		local normal = forwardRay.Normal
 		local incoming = vel.Unit
 		local reflection = incoming - (2 * incoming:Dot(normal) * normal)
-		local trapPos = forwardRay.Position + (reflection * 12) -- Aim for the bounce
+		local trapPos = forwardRay.Position + (reflection * 12)
 		
-		-- Check if we can reach the trap position
 		if (trapPos - botRoot.Position).Magnitude < CONFIG.CORNER_TRAP_MAX_DIST then
-			return trapPos, "CORNER TRAP"
+			-- Blend corner trap with ML prediction
+			local blendedTrap = trapPos:Lerp(mlPos, 0.3)
+			return blendedTrap, "CORNER TRAP ML"
 		end
 	end
 	
-	return linearPos, "CHASING"
+	-- Flanking behavior when far away and player keeps escaping
+	local dist = (botRoot.Position - playerRoot.Position).Magnitude
+	if dist > CONFIG.FLANK_DISTANCE_THRESHOLD and PlayerMemory.consecutiveEscapes > 3 then
+		local toPlayer = (playerRoot.Position - botRoot.Position).Unit
+		local flankAngle = CONFIG.FLANK_ANGLE * (math.random() > 0.5 and 1 or -1)
+		local flankDir = CFrame.Angles(0, flankAngle, 0) * CFrame.new(toPlayer.X, toPlayer.Y, toPlayer.Z)
+		local flankPos = mlPos + flankDir.Position * 10
+		return flankPos, "FLANKING"
+	end
+	
+	return mlPos, mlStatus
 end
 
 -- 6. MAIN AI LOOP
@@ -280,7 +483,7 @@ task.spawn(function()
 	
 	local startPos = targetRoot.Position + Vector3.new(CONFIG.SPAWN_DIST, 5, 0)
 	local bot, botRoot, botHum, botAlign, botImg, botHead, clickDetector = createNextbot(startPos)
-	print("GENIUS BOT V13.17 ONLINE - SPECTATOR MODE")
+	print("GENIUS BOT V14.0 ONLINE - ADAPTIVE ML ENGINE")
 
 	-- [[ GUI CONNECTION ]]
 	local freezeBtn, spectateBtn = createControlGui(player)
@@ -316,7 +519,36 @@ task.spawn(function()
 	-- Connect Events
 	freezeBtn.MouseButton1Click:Connect(toggleFreeze)
 	spectateBtn.MouseButton1Click:Connect(toggleSpectate)
-	clickDetector.MouseClick:Connect(toggleFreeze)
+	clickDetector.MouseClick:Connect(function(clickPlayer)
+		if clickPlayer == player then
+			toggleFreeze()
+		end
+	end)
+	
+	-- Handle player respawn gracefully
+	player.CharacterAdded:Connect(function(newChar)
+		task.wait(0.5)
+		local newRoot = newChar:WaitForChild("HumanoidRootPart", 5)
+		if newRoot then
+			targetRoot = newRoot
+		end
+	end)
+	
+	-- Handle player leaving
+	Players.PlayerRemoving:Connect(function(leavingPlayer)
+		if leavingPlayer == player then
+			-- Find new target
+			local newPlayers = Players:GetPlayers()
+			for _, p in ipairs(newPlayers) do
+				if p ~= leavingPlayer and p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
+					player = p
+					targetRoot = p.Character.HumanoidRootPart
+					createControlGui(player)
+					return
+				end
+			end
+		end
+	end)
 
 	local waypoints = {}
 	local currentPointIndex = 2
@@ -324,6 +556,7 @@ task.spawn(function()
 	local lastTargetPos = targetRoot.Position
 	local isComputing = false
 	local forceRepath = false
+	local lastPrediction = targetRoot.Position
 	
 	local lastStuckCheck = tick()
 	local lastStuckPos = botRoot.Position
@@ -338,52 +571,82 @@ task.spawn(function()
 		WaypointSpacing = 1.5, 
 		Costs = { 
 			Water = 20,
-			DangerDetector = 99999, -- Avoid danger zones
+			DangerDetector = 99999,
 			Door = 1
 		}
 	})
 
 	path.Blocked:Connect(function(blockedWaypointIdx)
-		if blockedWaypointIdx >= currentPointIndex then forceRepath = true end
+		if waypoints and blockedWaypointIdx >= currentPointIndex then 
+			forceRepath = true 
+		end
 	end)
 	
 	-- GLITCH STATE VARIABLES
 	local noiseSeed = math.random(10000)
+	local predictionUpdateTimer = 0
 
 	RunService.Heartbeat:Connect(function(dt)
-		local statsLabel = botRoot.Parent:FindFirstChild("BillboardGui"):FindFirstChild("StatsLabel")
+		-- Safe billboard access
+		local billboard = bot and bot:FindFirstChild("BillboardGui")
+		local statsLabel = billboard and billboard:FindFirstChild("StatsLabel")
 		
 		-- [[ FREEZE LOGIC ]]
 		if IS_FROZEN then
-			botHum:MoveTo(botRoot.Position) -- Halt Movement
-			botAlign.CFrame = botRoot.CFrame -- Halt Glitching
+			if botRoot then
+				botHum:MoveTo(botRoot.Position)
+				botAlign.CFrame = botRoot.CFrame
+			end
 			if statsLabel then 
 				statsLabel.Text = "SYSTEM FROZEN"
 				statsLabel.TextColor3 = Color3.new(0, 1, 1)
 			end
-			return -- SKIP EVERYTHING ELSE
+			return
 		end
 
-		if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then
-			local p = Players:GetPlayers()[1]
-			if p and p.Character then 
-				player = p
-				targetRoot = p.Character:FindFirstChild("HumanoidRootPart")
+		-- Safe player/character validation
+		if not player or not player.Parent then
+			local newPlayers = Players:GetPlayers()
+			if #newPlayers > 0 then
+				player = newPlayers[1]
+			else
+				return
 			end
+		end
+		
+		if not player.Character or not player.Character:FindFirstChild("HumanoidRootPart") then
 			return
 		end
 		
 		targetRoot = player.Character.HumanoidRootPart
 		local targetHum = player.Character:FindFirstChild("Humanoid")
 		if not targetHum or targetHum.Health <= 0 then return end
-		if not botRoot then return end
+		if not botRoot or not botRoot.Parent then return end
 		
 		local ignoreList = {bot, player.Character}
 		
 		-- [[ ANALYSE WORLD ]]
 		analyseTerrainAndObstacles(botRoot, botHum, ignoreList)
 		
+		-- [[ ADAPTIVE DIFFICULTY ]]
+		local difficultyMultiplier = math.min(CONFIG.DIFFICULTY_MAX_MULTIPLIER, 1 + (SCORE * CONFIG.DIFFICULTY_SCALE_KILLS))
+		botHum.WalkSpeed = math.max(botHum.WalkSpeed, CONFIG.CONSTANT_SPEED * difficultyMultiplier)
+		
 		local dist = (botRoot.Position - targetRoot.Position).Magnitude
+		
+		-- Close-range speed boost
+		if dist < 20 then
+			botHum.WalkSpeed = botHum.WalkSpeed * CONFIG.CHASE_ACCEL_CLOSE
+		end
+		
+		-- [[ DISTANCE-BASED AUDIO ]]
+		local chaseSound = botRoot:FindFirstChild("ChaseMusic")
+		if chaseSound then
+			local volumeScale = math.clamp(1 - (dist / CONFIG.CHASE_AUDIO_RANGE), 0, 1)
+			chaseSound.Volume = CONFIG.CHASE_VOLUME_MIN + (CONFIG.CHASE_VOLUME_MAX - CONFIG.CHASE_VOLUME_MIN) * volumeScale
+			-- Pitch increases as bot gets closer for tension
+			chaseSound.PlaybackSpeed = 0.9 + (0.3 * (1 - math.clamp(dist / 50, 0, 1)))
+		end
 		
 		-- ========================================================================
 		-- [[ UPGRADED SHATTERED REALITY GLITCH ]]
@@ -393,18 +656,16 @@ task.spawn(function()
 		local intensity = math.clamp((80 - dist) / 2.2, 1, 30)
 		local t = tick()
 		
-		local lookTarget = waypoints and waypoints[currentPointIndex] and waypoints[currentPointIndex].Position or targetRoot.Position
+		local lookTarget = (waypoints and waypoints[currentPointIndex]) and waypoints[currentPointIndex].Position or targetRoot.Position
 		local baseCFrame = CFrame.lookAt(botRoot.Position, Vector3.new(lookTarget.X, botRoot.Position.Y, lookTarget.Z))
 		
 		-- 1. The "Electronic" Snap (Perlin Noise + Hard Snaps) - Enhanced
-		local snapChance = (0.06 * intensity) -- Chance increases with intensity
+		local snapChance = (0.06 * intensity)
 		if math.random() < (snapChance / 18) then
-			-- Hard aggressive snap
 			local snapX = math.rad(math.random(-60, 60))
 			local snapY = math.rad(math.random(-180, 180))
 			baseCFrame = baseCFrame * CFrame.Angles(snapX, snapY, 0)
 			
-			-- Audio glitch trigger
 			if math.random() < 0.5 then
 				local s = botRoot:FindFirstChild("GlitchSFX")
 				if s then 
@@ -414,7 +675,6 @@ task.spawn(function()
 				end
 			end
 		else
-			-- Subtle digital vibration using Perlin Noise
 			local nX = math.noise(t * 10, noiseSeed, 0) * (intensity / 8)
 			local nY = math.noise(t * 10, noiseSeed, 100) * (intensity / 8)
 			local nZ = math.noise(t * 10, noiseSeed, 200) * (intensity / 4)
@@ -423,27 +683,24 @@ task.spawn(function()
 
 		-- 2. Texture Phasing & Chromatic Glitch - Enhanced
 		if math.random() < (0.1 * intensity) then
-			-- Flash bright colors (Cyan/Purple/Red/Invert/White)
 			local rng = math.random()
 			if rng > 0.8 then
-				botImg.ImageColor3 = Color3.new(0, 1, 1) -- Cyan
+				botImg.ImageColor3 = Color3.new(0, 1, 1)
 			elseif rng > 0.6 then
-				botImg.ImageColor3 = Color3.new(1, 0, 1) -- Magenta
+				botImg.ImageColor3 = Color3.new(1, 0, 1)
 			elseif rng > 0.4 then
-				botImg.ImageColor3 = Color3.new(1, 0, 0) -- Red
+				botImg.ImageColor3 = Color3.new(1, 0, 0)
 			elseif rng > 0.2 then
-				botImg.ImageColor3 = Color3.new(1, 1, 0) -- Yellow
+				botImg.ImageColor3 = Color3.new(1, 1, 0)
 			else
-				botImg.ImageColor3 = Color3.new(1, 1, 1) -- White Flash
+				botImg.ImageColor3 = Color3.new(1, 1, 1)
 			end
 			botHead.Transparency = math.random(2, 9) / 10
-			-- Extreme close range: add color to head
 			if intensity > 15 then
 				local headColors = {Color3.new(1, 0, 0), Color3.new(0, 1, 1), Color3.new(1, 0, 1)}
 				botHead.Color = headColors[math.random(1, #headColors)]
 			end
 		else
-			-- Return to normal
 			botImg.ImageColor3 = Color3.new(1,1,1)
 			botHead.Transparency = 0
 			botHead.Color = Color3.new(0,0,0)
@@ -451,14 +708,13 @@ task.spawn(function()
 
 		-- 3. Spatial Tearing & Size Distortion - Enhanced
 		if intensity > 4 and math.random() < 0.35 then
-			-- Randomly stretch the mesh more aggressively
 			local scaleNoise = math.noise(t * 18, 500) * (intensity / 6)
 			botHead.Size = Vector3.new(7 + scaleNoise * 1.5, 10 + scaleNoise * 1.5, 1 + (scaleNoise/2))
 		else
 			botHead.Size = Vector3.new(7, 10, 1)
 		end
 
-		-- Position Jitter (Using noise for "electric" feel) - Enhanced
+		-- Position Jitter
 		local jitterScale = 0.25 * intensity
 		local jitterX = (math.random() - 0.5) * jitterScale
 		local jitterY = (math.random() - 0.5) * jitterScale
@@ -477,40 +733,62 @@ task.spawn(function()
 			targetHum.Health = 0
 			
 			SCORE = SCORE + 1
+			-- Reset ML memory on kill for fresh learning on respawn
+			PlayerMemory.consecutiveEscapes = 0
+			PlayerMemory.aggressionLevel = 0.5
+			
 			if statsLabel then
 				statsLabel.Text = "KILLS: " .. SCORE
 				statsLabel.TextColor3 = Color3.new(1, 0, 0) 
 				task.delay(0.5, function()
-					if not IS_FROZEN then statsLabel.TextColor3 = Color3.new(1, 0.2, 0.2) end
+					if not IS_FROZEN and statsLabel then statsLabel.TextColor3 = Color3.new(1, 0.2, 0.2) end
 				end)
 			end
 		end
 		
-		-- [[ AUTO JUMP ]]
+		-- [[ AUTO JUMP - Enhanced ]]
 		local moveVel = botRoot.AssemblyLinearVelocity
 		local flatVel = moveVel * Vector3.new(1,0,1)
 		if flatVel.Magnitude > 8 then
+			RAY_PARAMS.FilterDescendantsInstances = ignoreList
 			local kneeRay = workspace:Raycast(botRoot.Position - Vector3.new(0, 2, 0), flatVel.Unit * 5, RAY_PARAMS)
 			if kneeRay and kneeRay.Instance then
 				botHum.Jump = true
-				-- Extra boost for high obstacles
 				if kneeRay.Instance.Size.Y > CONFIG.HIGH_OBSTACLE_THRESHOLD then
 					task.delay(0.05, function()
-						botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + Vector3.new(0, CONFIG.JUMP_BOOST_VELOCITY, 0)
+						if botRoot and botRoot.Parent then
+							botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + Vector3.new(0, CONFIG.JUMP_BOOST_VELOCITY, 0)
+						end
 					end)
 				end
 			end
+			-- Also check slightly higher for ledges
+			local headRay = workspace:Raycast(botRoot.Position + Vector3.new(0, 2, 0), flatVel.Unit * 4, RAY_PARAMS)
+			if headRay and not kneeRay then
+				-- Obstacle above but not at knee level - duck/slide behavior
+				botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + Vector3.new(0, -5, 0)
+			end
 		end
 		
-		-- [[ STUCK MONITOR ]]
+		-- [[ STUCK MONITOR - Enhanced with teleport fallback ]]
 		if tick() - lastStuckCheck > 0.25 then
 			if (botRoot.Position - lastStuckPos).Magnitude < 0.8 then
 				stuckCount += 1
 				botHum.Jump = true
-				if stuckCount > 1 then
-					-- Aggressive unstuck: boost upward and forward
+				if stuckCount > 1 and stuckCount < CONFIG.TELEPORT_STUCK_THRESHOLD then
 					botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + Vector3.new(0, CONFIG.UNSTUCK_VELOCITY_UP, 0) + (botRoot.CFrame.LookVector * CONFIG.UNSTUCK_VELOCITY_FORWARD)
-					stuckCount = 0; forceRepath = true
+					forceRepath = true
+				elseif stuckCount >= CONFIG.TELEPORT_STUCK_THRESHOLD then
+					-- Emergency teleport: move to a position between bot and player
+					local midPoint = botRoot.Position:Lerp(targetRoot.Position, 0.3)
+					local teleportRay = workspace:Raycast(midPoint + Vector3.new(0, 50, 0), Vector3.new(0, -100, 0), RAY_PARAMS)
+					if teleportRay then
+						botRoot.CFrame = CFrame.new(teleportRay.Position + Vector3.new(0, 3, 0))
+					else
+						botRoot.CFrame = CFrame.new(midPoint + Vector3.new(0, 5, 0))
+					end
+					stuckCount = 0
+					forceRepath = true
 				end
 			else
 				stuckCount = 0
@@ -518,8 +796,18 @@ task.spawn(function()
 			lastStuckPos = botRoot.Position; lastStuckCheck = tick()
 		end
 
-		-- [[ STOCKFISH ENGINE ]]
+		-- [[ ML PREDICTION ENGINE ]]
 		local bestMovePos, moveName = calculateGrandmasterMove(botRoot, targetRoot, ignoreList)
+		
+		-- Update prediction accuracy tracking
+		predictionUpdateTimer = predictionUpdateTimer + dt
+		if predictionUpdateTimer > 0.5 then
+			updatePredictionAccuracy(lastPrediction, targetRoot.Position)
+			predictionUpdateTimer = 0
+		end
+		if bestMovePos then
+			lastPrediction = bestMovePos
+		end
 		
 		local canSeePrediction = false
 		if bestMovePos then
@@ -530,7 +818,7 @@ task.spawn(function()
 			botHum:MoveTo(bestMovePos)
 			waypoints = nil 
 			if statsLabel and statsLabel.TextColor3 ~= Color3.new(1, 0, 0) then
-				statsLabel.Text = "KILLS: " .. SCORE
+				statsLabel.Text = "KILLS: " .. SCORE .. " [" .. moveName .. "]"
 			end
 		else
 			if statsLabel and statsLabel.TextColor3 ~= Color3.new(1, 0, 0) then
@@ -538,23 +826,26 @@ task.spawn(function()
 			end
 			
 			local targetMoved = (targetRoot.Position - lastTargetPos).Magnitude > 3
-			-- Adaptive path refresh rate based on distance
-			local refreshRate = dist < 30 and 0.08 or 0.15
+			-- Adaptive path refresh rate based on distance and ML aggression
+			local baseRefresh = dist < 30 and 0.08 or 0.15
+			local refreshRate = baseRefresh * (1 - PlayerMemory.aggressionLevel * 0.3)
 			local pathExpired = (tick() - lastPathTime > refreshRate)
 
 			if (targetMoved or pathExpired or forceRepath or waypoints == nil) and not isComputing then
 				isComputing = true; forceRepath = false
 				lastPathTime = tick(); lastTargetPos = targetRoot.Position
 				
+				-- Use ML prediction as pathfinding target when available
+				local pathTarget = bestMovePos or targetRoot.Position
+				
 				task.spawn(function()
-					local success, _ = pcall(function() path:ComputeAsync(botRoot.Position, targetRoot.Position) end)
+					local success, _ = pcall(function() path:ComputeAsync(botRoot.Position, pathTarget) end)
 					if success and path.Status == Enum.PathStatus.Success then
 						local newPoints = path:GetWaypoints()
 						if #newPoints > 0 then
 							waypoints = newPoints; currentPointIndex = 2; visualizeWaypoints(waypoints)
 						end
 					elseif path.Status == Enum.PathStatus.NoPath then
-						-- No path found, try direct approach
 						botHum:MoveTo(targetRoot.Position)
 					end
 					isComputing = false
@@ -564,25 +855,27 @@ task.spawn(function()
 			if waypoints and currentPointIndex <= #waypoints then
 				currentPointIndex = optimizePath(currentPointIndex, waypoints, botRoot.Position, ignoreList)
 				local targetPoint = waypoints[currentPointIndex]
-				botHum:MoveTo(targetPoint.Position)
-				if targetPoint.Action == Enum.PathWaypointAction.Jump then 
-					botHum.Jump = true
-					-- Extra momentum for jumps
-					if dist > 20 then
-						task.delay(0.03, function()
-							botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + (botRoot.CFrame.LookVector * CONFIG.JUMP_MOMENTUM_BOOST)
-						end)
+				if targetPoint then
+					botHum:MoveTo(targetPoint.Position)
+					if targetPoint.Action == Enum.PathWaypointAction.Jump then 
+						botHum.Jump = true
+						if dist > 20 then
+							task.delay(0.03, function()
+								if botRoot and botRoot.Parent then
+									botRoot.AssemblyLinearVelocity = botRoot.AssemblyLinearVelocity + (botRoot.CFrame.LookVector * CONFIG.JUMP_MOMENTUM_BOOST)
+								end
+							end)
+						end
 					end
-				end
-				
-				local currentSpeed = botRoot.AssemblyLinearVelocity.Magnitude
-				-- Dynamic arrival radius based on speed and distance
-				local baseRadius = dist < 25 and 1.2 or 1.8
-				local arrivalRadius = math.clamp(currentSpeed * 0.06, baseRadius, 5) 
-				
-				local vecToPoint = (targetPoint.Position - botRoot.Position) * Vector3.new(1,0,1)
-				if vecToPoint.Magnitude < arrivalRadius and math.abs(targetPoint.Position.Y - botRoot.Position.Y) < 10 then
-					currentPointIndex = currentPointIndex + 1
+					
+					local currentSpeed = botRoot.AssemblyLinearVelocity.Magnitude
+					local baseRadius = dist < 25 and 1.2 or 1.8
+					local arrivalRadius = math.clamp(currentSpeed * 0.06, baseRadius, 5) 
+					
+					local vecToPoint = (targetPoint.Position - botRoot.Position) * Vector3.new(1,0,1)
+					if vecToPoint.Magnitude < arrivalRadius and math.abs(targetPoint.Position.Y - botRoot.Position.Y) < 10 then
+						currentPointIndex = currentPointIndex + 1
+					end
 				end
 			end
 		end
